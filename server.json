@@ -1,0 +1,52 @@
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.get('/api/download', async (req, res) => {
+    try {
+        const { url } = req.query;
+        if (!url) return res.status(400).json({ error: 'URL is required' });
+
+        // Resolve Redirects for short links (/s/)
+        const response = await fetch(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        const finalUrl = response.url;
+
+        // Extract UUID
+        const uuidMatch = finalUrl.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i) ||
+                          url.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+
+        if (!uuidMatch) {
+            return res.status(400).json({ error: 'Invalid Suno link or Song ID not found.' });
+        }
+
+        const songId = uuidMatch[1];
+        const apiUrl = `https://studio-api.suno.ai/api/external/clips/?ids=${songId}`;
+        
+        const apiRes = await fetch(apiUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        const apiData = await apiRes.json();
+
+        if (Array.isArray(apiData) && apiData.length > 0) {
+            const clip = apiData[0];
+            return res.json({
+                title: clip.title || `Suno_Track_${songId.substring(0, 8)}`,
+                audio_url: clip.audio_url
+            });
+        } else {
+            return res.status(404).json({ error: 'Song details not found from Suno API.' });
+        }
+
+    } catch (err) {
+        return res.status(500).json({ error: 'Server error: ' + err.message });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

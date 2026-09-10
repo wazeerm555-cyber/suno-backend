@@ -4,13 +4,11 @@ const fetch = require('node-fetch');
 
 const app = express();
 
-// Allow ALL domains to access this API (Fixes CORS issue)
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Root test endpoint
 app.get('/', (req, res) => {
-    res.send("Suno Downloader Backend is Running Successfully!");
+    res.send("Suno Downloader Backend is Running!");
 });
 
 app.get('/api/download', async (req, res) => {
@@ -18,36 +16,62 @@ app.get('/api/download', async (req, res) => {
         const { url } = req.query;
         if (!url) return res.status(400).json({ error: 'URL is required' });
 
-        // Resolve Short links
-        const response = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-        });
-        const finalUrl = response.url;
+        // Step 1: Real Browser User-Agent to bypass Cloudflare
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://suno.com/'
+        };
 
-        // Extract UUID
-        const uuidMatch = finalUrl.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i) ||
-                          url.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+        // Step 2: Fetch Public Page HTML
+        const response = await fetch(url, { headers, redirect: 'follow' });
+        const htmlText = await response.text();
 
-        if (!uuidMatch) {
-            return res.status(400).json({ error: 'Invalid Suno link or Song ID not found.' });
+        // Step 3: Extract Next.js embedded JSON metadata
+        const jsonMatch = htmlText.match(/<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
+        
+        let audioUrl = null;
+        let title = null;
+
+        if (jsonMatch && jsonMatch[1]) {
+            try {
+                const pageData = JSON.parse(jsonMatch[1]);
+                const props = pageData?.props?.pageProps;
+                const clip = props?.clip || (props?.clips && props?.clips[0]);
+
+                if (clip) {
+                    audioUrl = clip.audio_url;
+                    title = clip.title || 'Suno_Track';
+                }
+            } catch (e) {
+                // Ignore JSON parse error
+            }
         }
 
-        const songId = uuidMatch[1];
-        const apiUrl = `https://studio-api.suno.ai/api/external/clips/?ids=${songId}`;
-        
-        const apiRes = await fetch(apiUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        const apiData = await apiRes.json();
+        // Fallback: Regex extraction for MP3 link if JSON path moved
+        if (!audioUrl) {
+            const mp3Match = htmlText.match(/https:\/\/[^\s"<]+\.mp3[^\s"<]*/i);
+            if (mp3Match) {
+                audioUrl = mp3Match[0];
+                title = 'Suno_Track';
+            }
+        }
 
-        if (Array.isArray(apiData) && apiData.length > 0) {
-            const clip = apiData[0];
-            return res.json({
-                title: clip.title || `Suno_Track_${songId.substring(0, 8)}`,
-                audio_url: clip.audio_url
-            });
+        // Fallback: UUID extraction to direct CDN URL
+        if (!audioUrl) {
+            const uuidMatch = response.url.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i) ||
+                              url.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+            if (uuidMatch) {
+                audioUrl = `https://cdn1.suno.ai/${uuidMatch[1]}.mp3`;
+                title = `Suno_Track_${uuidMatch[1].substring(0, 8)}`;
+            }
+        }
+
+        if (audioUrl) {
+            return res.json({ title, audio_url: audioUrl });
         } else {
-            return res.status(404).json({ error: 'Song details not found from Suno API.' });
+            return res.status(404).json({ error: 'Song details or audio link could not be extracted from page.' });
         }
 
     } catch (err) {
